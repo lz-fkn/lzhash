@@ -9,6 +9,7 @@ simple hashing utility in go
 * integrated benchmark
 
 ## how to use
+![example](lzhash_pic.png)
 `lzhash [-t/--type algo] [-b/--benchmark] <file, directory or string>`<br>
 it's pretty easy to use, eh?
 
