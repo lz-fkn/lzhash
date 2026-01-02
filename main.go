@@ -80,7 +80,6 @@ var benchmark bool
 var benchSeed int64
 
 func init() {
-	fmt.Println("lzHash v1.3, by Elzzie. BSD 2-Clause License\n")
 	flag.StringVar(&selectedAlgoName, "t", "sha256",
 		"Specify the hash algorithm")
 	flag.StringVar(&selectedAlgoName, "type", "sha256",
@@ -228,6 +227,7 @@ func hashDirectory(dirPath string) error {
 }
 
 func main() {
+	fmt.Println("lzHash v1.3, by Elzzie. BSD 2-Clause License\n")
 	if benchmark {
 		benchAll()
 		return
@@ -273,3 +273,4 @@ func main() {
 		os.Exit(1)
 	}
 }
+
