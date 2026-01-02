@@ -11,6 +11,7 @@ import (
 	"sort"
 	"hash"
 	"hash/crc32"
+	"hash/crc64"
 	"hash/adler32"
 	"hash/fnv"
 	"io"
@@ -29,6 +30,8 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"golang.org/x/crypto/sha3"
 	"github.com/gnabgib/gnablib-go/checksum/fletcher"
+	"github.com/tjfoc/gmsm/sm3"
+	"github.com/dchest/siphash"
 )
 
 func MustNewHash(h hash.Hash, err error) hash.Hash {
@@ -43,9 +46,10 @@ var supportedAlgos = map[string]func() hash.Hash{
 	"blake2b-256":  func() hash.Hash { return MustNewHash(blake2b.New256(nil)) },
 	"blake2b-384":  func() hash.Hash { return MustNewHash(blake2b.New384(nil)) },
 	"blake2b-512":  func() hash.Hash { return MustNewHash(blake2b.New512(nil)) },
-	"blake2s":      func() hash.Hash { return MustNewHash(blake2s.New256(nil)) },
-	"blake3":       func() hash.Hash { return blake3.New() },
+	"blake2s-256":	func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
+ 	"blake3":       func() hash.Hash { return blake3.New() },
 	"crc32":        func() hash.Hash { return crc32.NewIEEE() },
+	"crc64": 		func() hash.Hash { return crc64.New(crc64.MakeTable(crc64.ECMA)) },
 	"fletcher32":   func() hash.Hash { return fletcher.New32() },
 	"fnv-32":       func() hash.Hash { return fnv.New32() },
 	"fnv-64a":      func() hash.Hash { return fnv.New64a() },
@@ -54,18 +58,29 @@ var supportedAlgos = map[string]func() hash.Hash{
 	"murmur3-32":   func() hash.Hash { return murmur3.New32() },
 	"ripemd160":    func() hash.Hash { return ripemd160.New() },
 	"sha1":         func() hash.Hash { return sha1.New() },
+	"sha224": 		func() hash.Hash { return sha256.New224() },
 	"sha256":       func() hash.Hash { return sha256.New() },
 	"sha384":       func() hash.Hash { return sha512.New384() },
 	"sha512":       func() hash.Hash { return sha512.New() },
+	"sha512-256":   func() hash.Hash { return sha512.New512_256() },
+	"sha3-224": 	func() hash.Hash { return sha3.New224() },
 	"sha3-256":     func() hash.Hash { return sha3.New256() },
+	"sha3-384": 	func() hash.Hash { return sha3.New384() },
+	"sha3-512": 	func() hash.Hash { return sha3.New512() },
+	"shake128": 	func() hash.Hash { return sha3.NewShake128() },
+	"shake256": 	func() hash.Hash { return sha3.NewShake256() },
+	"siphash": 		func() hash.Hash { return siphash.New(make([]byte, 16)) },
+	"sm3": 			func() hash.Hash { return sm3.New() },
 	"xxh64":        func() hash.Hash { return xxhash.New() },
 }
 
 var selectedHash func() hash.Hash
 var selectedAlgoName string
 var benchmark bool
+var benchSeed int64
 
 func init() {
+	fmt.Println("lzHash v1.3, by Elzzie. BSD 2-Clause License\n")
 	flag.StringVar(&selectedAlgoName, "t", "sha256",
 		"Specify the hash algorithm")
 	flag.StringVar(&selectedAlgoName, "type", "sha256",
@@ -73,8 +88,15 @@ func init() {
 
 	flag.BoolVar(&benchmark, "b", false, "Run benchmark mode (hash all algorithms)")
 	flag.BoolVar(&benchmark, "benchmark", false, "Alias for -b")
+	flag.Int64Var(&benchSeed, "s", 42, "Benchmark RNG seed (only valid with -b)")
+	flag.Int64Var(&benchSeed, "bench-seed", 42, "Alias for -s")
 
 	flag.Parse()
+
+	if benchSeed != 42 && !benchmark {
+		fmt.Fprintln(os.Stderr, "Error: -s/--bench-seed can only be used together with -b/--benchmark")
+		os.Exit(1)
+	}
 
 	if benchmark {
 		return
@@ -101,9 +123,18 @@ func getSupportedAlgosList() string {
 func benchAll() {
     const dataSize = 1024 * 1024
     const iterations = 1024
+	const preview = 8
 
-    data := make([]byte, dataSize)
-    rand.Read(data)
+    rng := rand.New(rand.NewSource(benchSeed))
+	data := make([]byte, dataSize)
+	rng.Read(data)
+
+	fmt.Printf(
+		"Using %x...%x as input data (seed: %d)\n",
+		data[:preview],
+		data[len(data)-preview:],
+		benchSeed,
+	)
 
     fmt.Println("Benchmarking all algorithms (1MB, 1024 iterations):")
     fmt.Println("=================================================")
@@ -115,31 +146,39 @@ func benchAll() {
     sort.Strings(keys)
 
     for _, name := range keys {
-        factory := supportedAlgos[name]
-
+		factory := supportedAlgos[name]
 		h := factory()
-        start := time.Now()
-        for i := 0; i < iterations; i++ {
-            h.Reset()
-            h.Write(data)
-            _ = h.Sum(nil)
-        }
 
-        total := time.Since(start)
-        avg := total / iterations
+		var sum []byte
 
-        seconds := avg.Seconds()
-        mbPerSec := (float64(dataSize) / (1024 * 1024)) / seconds
+		start := time.Now()
+		for i := 0; i < iterations; i++ {
+			h.Reset()
+			h.Write(data)
+			sum = h.Sum(nil)
+		}
 
-        var speedStr string
-        if mbPerSec >= 1024 {
-            speedStr = fmt.Sprintf("%.2f GB/s", mbPerSec/1024)
-        } else {
-            speedStr = fmt.Sprintf("%.2f MB/s", mbPerSec)
-        }
+		total := time.Since(start)
+		avg := total / iterations
 
-        fmt.Printf("%-15s avg/iter = %v (%s)\n", name, avg, speedStr)
-    }
+		seconds := avg.Seconds()
+		mbPerSec := (float64(dataSize) / (1024 * 1024)) / seconds
+
+		var speedStr string
+		if mbPerSec >= 1024 {
+			speedStr = fmt.Sprintf("%.2f GB/s", mbPerSec/1024)
+		} else {
+			speedStr = fmt.Sprintf("%.2f MB/s", mbPerSec)
+		}
+
+		fmt.Printf(
+			"%-15s avg/iter = %-10v (%-11s), result hash = %x\n",
+			name,
+			avg,
+			speedStr,
+			sum,
+		)
+	}
 
     fmt.Println("=================================================")
 }
