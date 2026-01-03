@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -25,21 +26,36 @@ import (
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/md4"
-	"golang.org/x/crypto/ripemd160"
+	"github.com/c0mm4nd/go-ripemd"
 	"github.com/spaolacci/murmur3"
 	"github.com/cespare/xxhash/v2"
 	"golang.org/x/crypto/sha3"
 	"github.com/gnabgib/gnablib-go/checksum/fletcher"
 	"github.com/tjfoc/gmsm/sm3"
-	"github.com/dchest/siphash"
+	"github.com/cxmcc/tiger"
+	"github.com/jzelinskie/whirlpool"
 )
 
+const lzHashVersion = "v1.3.4"
+
+const defaultAlgo = "sha256" // i won't recommend some insecure or niche algo, so sha256 should do
+
+// benchmark options
+const defaultSeed = 42 
+const dataSize = 1 * 1024 * 1024 // 1MB
+const iterations = 1024
+const preview = 8 // symbols on each side
+
+// some algos (blake2 family) return an error, so it's here to make it easy
 func MustNewHash(h hash.Hash, err error) hash.Hash {
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialize hash function: %v", err))
 	}
 	return h
 }
+
+// not sure if it truly needs to be separated, or it can be moved to crc64.New(...), but whatever 
+var ecmaTable = crc64.MakeTable(crc64.ECMA)
 
 var supportedAlgos = map[string]func() hash.Hash{
 	"adler32":      func() hash.Hash { return adler32.New() },
@@ -49,14 +65,17 @@ var supportedAlgos = map[string]func() hash.Hash{
 	"blake2s-256":	func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
  	"blake3":       func() hash.Hash { return blake3.New() },
 	"crc32":        func() hash.Hash { return crc32.NewIEEE() },
-	"crc64": 		func() hash.Hash { return crc64.New(crc64.MakeTable(crc64.ECMA)) },
+	"crc64": 		func() hash.Hash { return crc64.New(ecmaTable) },
 	"fletcher32":   func() hash.Hash { return fletcher.New32() },
 	"fnv-32":       func() hash.Hash { return fnv.New32() },
 	"fnv-64a":      func() hash.Hash { return fnv.New64a() },
 	"md4":          func() hash.Hash { return md4.New() },
 	"md5":          func() hash.Hash { return md5.New() },
 	"murmur3-32":   func() hash.Hash { return murmur3.New32() },
-	"ripemd160":    func() hash.Hash { return ripemd160.New() },
+	"ripemd128":    func() hash.Hash { return ripemd.New128() },
+	"ripemd160":    func() hash.Hash { return ripemd.New160() },
+	"ripemd256":    func() hash.Hash { return ripemd.New256() },
+	"ripemd320":    func() hash.Hash { return ripemd.New320() },
 	"sha1":         func() hash.Hash { return sha1.New() },
 	"sha224": 		func() hash.Hash { return sha256.New224() },
 	"sha256":       func() hash.Hash { return sha256.New() },
@@ -69,9 +88,12 @@ var supportedAlgos = map[string]func() hash.Hash{
 	"sha3-512": 	func() hash.Hash { return sha3.New512() },
 	"shake128": 	func() hash.Hash { return sha3.NewShake128() },
 	"shake256": 	func() hash.Hash { return sha3.NewShake256() },
-	"siphash": 		func() hash.Hash { return siphash.New(make([]byte, 16)) },
 	"sm3": 			func() hash.Hash { return sm3.New() },
+	"tiger": 		func() hash.Hash { return tiger.New() },
+	"tiger2": 		func() hash.Hash { return tiger.New2() },
+	"whirlpool": 	func() hash.Hash { return whirlpool.New() },
 	"xxh64":        func() hash.Hash { return xxhash.New() },
+	// you can add more algos if you want, as long as they use simple hash.Hash
 }
 
 var selectedHash func() hash.Hash
@@ -80,19 +102,20 @@ var benchmark bool
 var benchSeed int64
 
 func init() {
-	flag.StringVar(&selectedAlgoName, "t", "sha256",
+	flag.StringVar(&selectedAlgoName, "t", defaultAlgo,
 		"Specify the hash algorithm")
-	flag.StringVar(&selectedAlgoName, "type", "sha256",
+	flag.StringVar(&selectedAlgoName, "type", defaultAlgo,
 		"Alias for -t")
 
+	// ugly
 	flag.BoolVar(&benchmark, "b", false, "Run benchmark mode (hash all algorithms)")
 	flag.BoolVar(&benchmark, "benchmark", false, "Alias for -b")
-	flag.Int64Var(&benchSeed, "s", 42, "Benchmark RNG seed (only valid with -b)")
-	flag.Int64Var(&benchSeed, "bench-seed", 42, "Alias for -s")
+	flag.Int64Var(&benchSeed, "s", defaultSeed, "Benchmark RNG seed (only valid with -b)")
+	flag.Int64Var(&benchSeed, "bench-seed", defaultSeed, "Alias for -s")
 
 	flag.Parse()
 
-	if benchSeed != 42 && !benchmark {
+	if benchSeed != defaultSeed && !benchmark {
 		fmt.Fprintln(os.Stderr, "Error: -s/--bench-seed can only be used together with -b/--benchmark")
 		os.Exit(1)
 	}
@@ -120,10 +143,6 @@ func getSupportedAlgosList() string {
 }
 
 func benchAll() {
-    const dataSize = 1024 * 1024
-    const iterations = 1024
-	const preview = 8
-
     rng := rand.New(rand.NewSource(benchSeed))
 	data := make([]byte, dataSize)
 	rng.Read(data)
@@ -135,8 +154,8 @@ func benchAll() {
 		benchSeed,
 	)
 
-    fmt.Println("Benchmarking all algorithms (1MB, 1024 iterations):")
-    fmt.Println("=================================================")
+    fmt.Printf("Benchmarking all algorithms (%d bytes, %d iterations):\n", dataSize, iterations)
+    fmt.Println("======================================================")
 
     keys := make([]string, 0, len(supportedAlgos))
     for name := range supportedAlgos {
@@ -171,7 +190,7 @@ func benchAll() {
 		}
 
 		fmt.Printf(
-			"%-15s avg/iter = %-10v (%-11s), result hash = %x\n",
+			"%-15s avg/iter = %-11v (%-11s), result hash = %x\n",
 			name,
 			avg,
 			speedStr,
@@ -179,7 +198,7 @@ func benchAll() {
 		)
 	}
 
-    fmt.Println("=================================================")
+    fmt.Println("======================================================")
 }
 
 
@@ -227,7 +246,7 @@ func hashDirectory(dirPath string) error {
 }
 
 func main() {
-	fmt.Println("lzHash v1.3, by Elzzie. BSD 2-Clause License\n")
+	fmt.Printf("lzHash %s, by Elzzie. BSD 2-Clause License\n\n", lzHashVersion)
 	if benchmark {
 		benchAll()
 		return
@@ -260,10 +279,24 @@ func main() {
 			err = fmt.Errorf("input is a special file, only regular files and directories are supported: %s", input)
 		}
 	} else if errors.Is(statErr, os.ErrNotExist) {
-		hasher := selectedHash()
-		hasher.Write([]byte(input))
-		hashResult := hasher.Sum(nil)
-		fmt.Printf("'%s' %s: %x\n", input, selectedAlgoName, hashResult)
+		var data []byte
+		displayLabel := ""
+
+		if strings.HasPrefix(input, "0x") {
+			data, err = hex.DecodeString(input[2:])
+			if err != nil {
+				err = fmt.Errorf("invalid hex input: %w", err)
+			}
+			displayLabel = "(hex) "
+		} else {
+			data = []byte(input)
+		}
+
+		if err == nil {
+			hasher := selectedHash()
+			hasher.Write(data)
+			fmt.Printf("'%s' %s%s: %x\n", input, displayLabel, selectedAlgoName, hasher.Sum(nil))
+		}
 	} else {
 		err = fmt.Errorf("could not check input %s: %w", input, statErr)
 	}
