@@ -36,7 +36,7 @@ import (
 	"github.com/jzelinskie/whirlpool"
 )
 
-const lzHashVersion = "v1.3.4"
+const lzHashVersion = "v1.4-b1"
 
 const defaultAlgo = "sha256" // i won't recommend some insecure or niche algo, so sha256 should do
 
@@ -255,6 +255,17 @@ func main() {
 	args := flag.Args()
 
 	if len(args) == 0 {
+		stat, _ := os.Stdin.Stat()
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			hasher := selectedHash()
+			if _, err := io.Copy(hasher, os.Stdin); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("(stdin) %s: %x\n", selectedAlgoName, hasher.Sum(nil))
+			return
+		}
+
 		flag.Usage()
 		fmt.Println("\nSupported algorithms:")
 		fmt.Println(getSupportedAlgosList())
