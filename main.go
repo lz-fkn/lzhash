@@ -1,50 +1,59 @@
 package main
 
 import (
+	"bufio"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
-	"sort"
 	"hash"
+	"hash/adler32"
 	"hash/crc32"
 	"hash/crc64"
-	"hash/adler32"
 	"hash/fnv"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"encoding/hex"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/c0mm4nd/go-ripemd"
+	"github.com/cespare/xxhash/v2"
+	"github.com/cxmcc/tiger"
+	"github.com/gnabgib/gnablib-go/checksum/fletcher"
+	"github.com/jzelinskie/whirlpool"
+	"github.com/spaolacci/murmur3"
+	"github.com/tjfoc/gmsm/sm3"
 	"github.com/zeebo/blake3"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/md4"
-	"github.com/c0mm4nd/go-ripemd"
-	"github.com/spaolacci/murmur3"
-	"github.com/cespare/xxhash/v2"
 	"golang.org/x/crypto/sha3"
-	"github.com/gnabgib/gnablib-go/checksum/fletcher"
-	"github.com/tjfoc/gmsm/sm3"
-	"github.com/cxmcc/tiger"
-	"github.com/jzelinskie/whirlpool"
 )
 
-const lzHashVersion = "v1.3.4"
+const lzHashVersion = "v1.4.2"
 
 const defaultAlgo = "sha256" // i won't recommend some insecure or niche algo, so sha256 should do
 
 // benchmark options
-const defaultSeed = 42 
+const defaultSeed = 42
 const dataSize = 1 * 1024 * 1024 // 1MB
 const iterations = 1024
 const preview = 8 // symbols on each side
+
+const (
+	colorReset   = "\033[0m"
+	colorRed     = "\033[31m"
+	colorGreen   = "\033[32m"
+	colorYellow  = "\033[33m"
+	colorDarkRed = "\033[31;2m"
+)
 
 // some algos (blake2 family) return an error, so it's here to make it easy
 func MustNewHash(h hash.Hash, err error) hash.Hash {
@@ -58,41 +67,41 @@ func MustNewHash(h hash.Hash, err error) hash.Hash {
 var ecmaTable = crc64.MakeTable(crc64.ECMA)
 
 var supportedAlgos = map[string]func() hash.Hash{
-	"adler32":      func() hash.Hash { return adler32.New() },
-	"blake2b-256":  func() hash.Hash { return MustNewHash(blake2b.New256(nil)) },
-	"blake2b-384":  func() hash.Hash { return MustNewHash(blake2b.New384(nil)) },
-	"blake2b-512":  func() hash.Hash { return MustNewHash(blake2b.New512(nil)) },
-	"blake2s-256":	func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
- 	"blake3":       func() hash.Hash { return blake3.New() },
-	"crc32":        func() hash.Hash { return crc32.NewIEEE() },
-	"crc64": 		func() hash.Hash { return crc64.New(ecmaTable) },
-	"fletcher32":   func() hash.Hash { return fletcher.New32() },
-	"fnv-32":       func() hash.Hash { return fnv.New32() },
-	"fnv-64a":      func() hash.Hash { return fnv.New64a() },
-	"md4":          func() hash.Hash { return md4.New() },
-	"md5":          func() hash.Hash { return md5.New() },
-	"murmur3-32":   func() hash.Hash { return murmur3.New32() },
-	"ripemd128":    func() hash.Hash { return ripemd.New128() },
-	"ripemd160":    func() hash.Hash { return ripemd.New160() },
-	"ripemd256":    func() hash.Hash { return ripemd.New256() },
-	"ripemd320":    func() hash.Hash { return ripemd.New320() },
-	"sha1":         func() hash.Hash { return sha1.New() },
-	"sha224": 		func() hash.Hash { return sha256.New224() },
-	"sha256":       func() hash.Hash { return sha256.New() },
-	"sha384":       func() hash.Hash { return sha512.New384() },
-	"sha512":       func() hash.Hash { return sha512.New() },
-	"sha512-256":   func() hash.Hash { return sha512.New512_256() },
-	"sha3-224": 	func() hash.Hash { return sha3.New224() },
-	"sha3-256":     func() hash.Hash { return sha3.New256() },
-	"sha3-384": 	func() hash.Hash { return sha3.New384() },
-	"sha3-512": 	func() hash.Hash { return sha3.New512() },
-	"shake128": 	func() hash.Hash { return sha3.NewShake128() },
-	"shake256": 	func() hash.Hash { return sha3.NewShake256() },
-	"sm3": 			func() hash.Hash { return sm3.New() },
-	"tiger": 		func() hash.Hash { return tiger.New() },
-	"tiger2": 		func() hash.Hash { return tiger.New2() },
-	"whirlpool": 	func() hash.Hash { return whirlpool.New() },
-	"xxh64":        func() hash.Hash { return xxhash.New() },
+	"adler32":     func() hash.Hash { return adler32.New() },
+	"blake2b-256": func() hash.Hash { return MustNewHash(blake2b.New256(nil)) },
+	"blake2b-384": func() hash.Hash { return MustNewHash(blake2b.New384(nil)) },
+	"blake2b-512": func() hash.Hash { return MustNewHash(blake2b.New512(nil)) },
+	"blake2s-256": func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
+	"blake3":      func() hash.Hash { return blake3.New() },
+	"crc32":       func() hash.Hash { return crc32.NewIEEE() },
+	"crc64":       func() hash.Hash { return crc64.New(ecmaTable) },
+	"fletcher32":  func() hash.Hash { return fletcher.New32() },
+	"fnv-32":      func() hash.Hash { return fnv.New32() },
+	"fnv-64a":     func() hash.Hash { return fnv.New64a() },
+	"md4":         func() hash.Hash { return md4.New() },
+	"md5":         func() hash.Hash { return md5.New() },
+	"murmur3-32":  func() hash.Hash { return murmur3.New32() },
+	"ripemd128":   func() hash.Hash { return ripemd.New128() },
+	"ripemd160":   func() hash.Hash { return ripemd.New160() },
+	"ripemd256":   func() hash.Hash { return ripemd.New256() },
+	"ripemd320":   func() hash.Hash { return ripemd.New320() },
+	"sha1":        func() hash.Hash { return sha1.New() },
+	"sha224":      func() hash.Hash { return sha256.New224() },
+	"sha256":      func() hash.Hash { return sha256.New() },
+	"sha384":      func() hash.Hash { return sha512.New384() },
+	"sha512":      func() hash.Hash { return sha512.New() },
+	"sha512-256":  func() hash.Hash { return sha512.New512_256() },
+	"sha3-224":    func() hash.Hash { return sha3.New224() },
+	"sha3-256":    func() hash.Hash { return sha3.New256() },
+	"sha3-384":    func() hash.Hash { return sha3.New384() },
+	"sha3-512":    func() hash.Hash { return sha3.New512() },
+	"shake128":    func() hash.Hash { return sha3.NewShake128() },
+	"shake256":    func() hash.Hash { return sha3.NewShake256() },
+	"sm3":         func() hash.Hash { return sm3.New() },
+	"tiger":       func() hash.Hash { return tiger.New() },
+	"tiger2":      func() hash.Hash { return tiger.New2() },
+	"whirlpool":   func() hash.Hash { return whirlpool.New() },
+	"xxh64":       func() hash.Hash { return xxhash.New() },
 	// you can add more algos if you want, as long as they use simple hash.Hash
 }
 
@@ -100,20 +109,42 @@ var selectedHash func() hash.Hash
 var selectedAlgoName string
 var benchmark bool
 var benchSeed int64
+var outputHashlist string
+var inputHashlist string
 
 func init() {
-	flag.StringVar(&selectedAlgoName, "t", defaultAlgo,
-		"Specify the hash algorithm")
-	flag.StringVar(&selectedAlgoName, "type", defaultAlgo,
-		"Alias for -t")
+	// all this shit is ugly af
+	flag.StringVar(&selectedAlgoName, "t", defaultAlgo, "Specify the hash algorithm")
+	flag.StringVar(&selectedAlgoName, "type", defaultAlgo, "Alias for -t")
 
-	// ugly
 	flag.BoolVar(&benchmark, "b", false, "Run benchmark mode (hash all algorithms)")
 	flag.BoolVar(&benchmark, "benchmark", false, "Alias for -b")
 	flag.Int64Var(&benchSeed, "s", defaultSeed, "Benchmark RNG seed (only valid with -b)")
 	flag.Int64Var(&benchSeed, "bench-seed", defaultSeed, "Alias for -s")
 
+	flag.StringVar(&outputHashlist, "O", "", "Create a checksum file")
+	flag.StringVar(&outputHashlist, "output-hashlist", "", "Alias for -O")
+	flag.StringVar(&inputHashlist, "I", "", "Verify files against a checksum file")
+	flag.StringVar(&inputHashlist, "input-hashlist", "", "Alias for -I")
+
 	flag.Parse()
+
+	if benchmark {
+		if len(flag.Args()) > 0 {
+			fmt.Fprintln(os.Stderr, "Error: user cannot decide (cannot use file arguments with -b/--benchmark)")
+			os.Exit(1)
+		}
+		isTypeSet := false
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "t" || f.Name == "type" {
+				isTypeSet = true
+			}
+		})
+		if isTypeSet {
+			fmt.Fprintln(os.Stderr, "Error: user cannot decide (cannot use -t/--type with -b/--benchmark)")
+			os.Exit(1)
+		}
+	}
 
 	if benchSeed != defaultSeed && !benchmark {
 		fmt.Fprintln(os.Stderr, "Error: -s/--bench-seed can only be used together with -b/--benchmark")
@@ -143,7 +174,7 @@ func getSupportedAlgosList() string {
 }
 
 func benchAll() {
-    rng := rand.New(rand.NewSource(benchSeed))
+	rng := rand.New(rand.NewSource(benchSeed))
 	data := make([]byte, dataSize)
 	rng.Read(data)
 
@@ -154,16 +185,16 @@ func benchAll() {
 		benchSeed,
 	)
 
-    fmt.Printf("Benchmarking all algorithms (%d bytes, %d iterations):\n", dataSize, iterations)
-    fmt.Println("======================================================")
+	fmt.Printf("Benchmarking all algorithms (%d bytes, %d iterations):\n", dataSize, iterations)
+	fmt.Println("======================================================")
 
-    keys := make([]string, 0, len(supportedAlgos))
-    for name := range supportedAlgos {
-        keys = append(keys, name)
-    }
-    sort.Strings(keys)
+	keys := make([]string, 0, len(supportedAlgos))
+	for name := range supportedAlgos {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
 
-    for _, name := range keys {
+	for _, name := range keys {
 		factory := supportedAlgos[name]
 		h := factory()
 
@@ -198,9 +229,8 @@ func benchAll() {
 		)
 	}
 
-    fmt.Println("======================================================")
+	fmt.Println("======================================================")
 }
-
 
 func hashFile(filePath string) error {
 	file, err := os.Open(filePath)
@@ -245,6 +275,189 @@ func hashDirectory(dirPath string) error {
 	})
 }
 
+func writeHashlist(inputPath string, outputPath string) error {
+	info, err := os.Stat(inputPath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("input is a special file, only regular files and directories are supported for hashlists")
+	}
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	header := fmt.Sprintf("#lzhash!ver:%s!algo:%s#\n", lzHashVersion, selectedAlgoName)
+	if _, err := outFile.WriteString(header); err != nil {
+		return err
+	}
+
+	totalCount := 0
+	processFile := func(path string) error {
+		f, err := os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", path, err)
+			return nil
+		}
+		defer f.Close()
+
+		h := selectedHash()
+		if _, err := io.Copy(h, f); err != nil {
+			return err
+		}
+
+		hashSum := h.Sum(nil)
+		
+		relPath, err := filepath.Rel(inputPath, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			relPath = filepath.Base(path)
+		}
+		
+		relPath = filepath.ToSlash(relPath)
+
+		fmt.Printf("%s %s: %x\n", relPath, selectedAlgoName, hashSum)
+
+		line := fmt.Sprintf("%x:%s\n", hashSum, relPath)
+		_, err = outFile.WriteString(line)
+		if err == nil {
+			totalCount++
+		}
+		return err
+	}
+
+	if info.IsDir() {
+		err = filepath.Walk(inputPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && info.Mode().IsRegular() {
+				return processFile(path)
+			}
+			return nil
+		})
+	} else {
+		err = processFile(inputPath)
+	}
+
+	if err == nil {
+		fmt.Printf("\nTotal: %d\n", totalCount)
+	}
+	return err
+}
+
+func verifyHashlist(listPath string, targetDir string) error {
+	file, err := os.Open(listPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var total, passed, failed, missing, errored int
+
+	scanner := bufio.NewScanner(file)
+	if !scanner.Scan() {
+		return errors.New("hashlist file is empty")
+	}
+
+	header := scanner.Text()
+	if !strings.HasPrefix(header, "#lzhash!") || !strings.HasSuffix(header, "#") {
+		return errors.New("invalid hashlist header format")
+	}
+
+	parts := strings.Split(header, "!")
+	var algo string
+	for _, p := range parts {
+		if strings.HasPrefix(p, "algo:") {
+			algo = strings.TrimPrefix(p, "algo:")
+			algo = strings.TrimSuffix(algo, "#")
+		}
+	}
+
+	if algo == "" {
+		return errors.New("no algorithm specified in hashlist header")
+	}
+
+	factory, ok := supportedAlgos[strings.ToLower(algo)]
+	if !ok {
+		return fmt.Errorf("unsupported hash algorithm in hashlist: %s", algo)
+	}
+
+	baseDir := targetDir
+	if baseDir == "" {
+		baseDir = filepath.Dir(listPath)
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx == -1 {
+			continue
+		}
+		total++
+		expectedHex := line[:idx]
+		relPath := filepath.FromSlash(line[idx+1:])
+		fullPath := filepath.Join(baseDir, relPath)
+
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Printf("%s: %sMISSING%s\n", relPath, colorYellow, colorReset)
+				missing++
+			} else {
+				fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
+				errored++
+			}
+			continue
+		}
+
+		if info.IsDir() {
+			fmt.Printf("%s: %sERROR (is a directory)%s\n", relPath, colorDarkRed, colorReset)
+			errored++
+			continue
+		}
+
+		f, err := os.Open(fullPath)
+		if err != nil {
+			fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
+			errored++
+			continue
+		}
+
+		h := factory()
+		_, copyErr := io.Copy(h, f)
+		f.Close()
+
+		if copyErr != nil {
+			fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
+			errored++
+			continue
+		}
+
+		actualHex := hex.EncodeToString(h.Sum(nil))
+		if actualHex == expectedHex {
+			fmt.Printf("%s: %sPASS%s\n", relPath, colorGreen, colorReset)
+			passed++
+		} else {
+			fmt.Printf("%s: %sFAIL%s\n", relPath, colorRed, colorReset)
+			failed++
+		}
+	}
+
+	fmt.Printf("\nTotal: %d. Passed: %d. Failed: %d. Missing: %d. Error: %d.\n",
+		total, passed, failed, missing, errored)
+
+	return scanner.Err()
+}
+
 func main() {
 	fmt.Printf("lzHash %s, by Elzzie. BSD 2-Clause License\n\n", lzHashVersion)
 	if benchmark {
@@ -252,9 +465,34 @@ func main() {
 		return
 	}
 
+	if inputHashlist != "" {
+		targetDir := ""
+		if len(flag.Args()) > 0 {
+			targetDir = flag.Args()[0]
+		}
+		
+		err := verifyHashlist(inputHashlist, targetDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	args := flag.Args()
 
 	if len(args) == 0 {
+		stat, _ := os.Stdin.Stat()
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			hasher := selectedHash()
+			if _, err := io.Copy(hasher, os.Stdin); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("(stdin) %s: %x\n", selectedAlgoName, hasher.Sum(nil))
+			return
+		}
+
 		flag.Usage()
 		fmt.Println("\nSupported algorithms:")
 		fmt.Println(getSupportedAlgosList())
@@ -266,8 +504,17 @@ func main() {
 		os.Exit(1)
 	}
 	input := args[0]
-	var err error
 
+	if outputHashlist != "" {
+		err := writeHashlist(input, outputHashlist)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating hashlist: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	var err error
 	info, statErr := os.Stat(input)
 
 	if statErr == nil {
@@ -306,4 +553,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
