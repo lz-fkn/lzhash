@@ -4,10 +4,10 @@ simple hashing utility in go
 
 ## features
 * too many supported algos: adler32, blake2b-256, blake2b-384, blake2b-512, blake2s-256, blake3, crc32, crc64, fletcher32, fnv-32, fnv-64a, md4, md5, murmur3-32, ripemd128, ripemd160, ripemd256, ripemd320, sha1, sha224, sha256, sha384, sha512, sha512-256, sha3-224, sha3-256, sha3-384, sha3-512, shake128, shake256, sm3, tiger, tiger2, whirlpool, xxh64. (default is sha256)
-* can hash files, directories, hex values and strings
-* pipe support
-* can make "hashlists"
-* pure go, so it can be compiled nearly anywhere
+* hashes files, directories, hex values and strings
+* supports stdin (pipes)
+* generates "hashlists"
+* pure go - can be compiled nearly anywhere
 * integrated benchmark mode w/ seed
 
 ## how to use
@@ -23,25 +23,24 @@ lzhash [-t/--type algo]
 it's pretty easy to use, eh?
 
 ## how to install
-obviously first check if you even have golang installed in the first place
+obviously first check if you have golang installed in the first place:
 ```
 go version 
 ```
-then simply run
+then simply run:
 ```
 go install github.com/lz-fkn/lzhash@latest
 ```
-then it should be available in your system, if not then check if GOPATH is in your PATH.
+it should be available in your system after that, if not then check if GOPATH is in your PATH.
 
 ## how to compile manually
-as in "how to install", make sure you have golang installed
+just like in "how to install", make sure you have golang installed first. then run:
 ```
 go mod init github.com/lz-fkn/lzhash
 go mod tidy
 go build -ldflags="-s -w" -o lzhash
 ```
-set GOOS and GOARCH if needed.
+set GOOS and GOARCH if needed. `-ldflags="-s -w"` can be omitted, but i prefer to compile with it
 
 ---
 lz-fkn, 2026. see LICENSE for license or something
-
