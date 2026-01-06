@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"runtime"
+    "sync"
 
 	"github.com/c0mm4nd/go-ripemd"
 	"github.com/cespare/xxhash/v2"
@@ -37,9 +39,9 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-const lzHashVersion = "v1.4.2"
+const lzHashVersion = "v1.5"
 
-const defaultAlgo = "sha256" // i won't recommend some insecure or niche algo, so sha256 should do
+const defaultAlgo = "sha256" // should do as default
 
 // benchmark options
 const defaultSeed = 42
@@ -54,6 +56,8 @@ const (
 	colorYellow  = "\033[33m"
 	colorDarkRed = "\033[31;2m"
 )
+
+var threads int
 
 // some algos (blake2 family) return an error, so it's here to make it easy
 func MustNewHash(h hash.Hash, err error) hash.Hash {
@@ -113,21 +117,32 @@ var outputHashlist string
 var inputHashlist string
 
 func init() {
-	// all this shit is ugly af
-	flag.StringVar(&selectedAlgoName, "t", defaultAlgo, "Specify the hash algorithm")
-	flag.StringVar(&selectedAlgoName, "type", defaultAlgo, "Alias for -t")
+	// ugly ugly thing
+	flag.StringVar(&selectedAlgoName, "type", defaultAlgo, "Specify the hash algorithm")
+	flag.StringVar(&selectedAlgoName, "t", defaultAlgo, "Alias for -type")
 
-	flag.BoolVar(&benchmark, "b", false, "Run benchmark mode (hash all algorithms)")
-	flag.BoolVar(&benchmark, "benchmark", false, "Alias for -b")
-	flag.Int64Var(&benchSeed, "s", defaultSeed, "Benchmark RNG seed (only valid with -b)")
-	flag.Int64Var(&benchSeed, "bench-seed", defaultSeed, "Alias for -s")
+	flag.BoolVar(&benchmark, "benchmark", false, "Run benchmark mode (hash all algorithms)")
+	flag.BoolVar(&benchmark, "b", false, "Alias for -benchmark")
+	flag.Int64Var(&benchSeed, "bench-seed", defaultSeed, "Benchmark RNG seed (only valid with -b)")
+	flag.Int64Var(&benchSeed, "s", defaultSeed, "Alias for -bench-seed")
 
-	flag.StringVar(&outputHashlist, "O", "", "Create a checksum file")
-	flag.StringVar(&outputHashlist, "output-hashlist", "", "Alias for -O")
-	flag.StringVar(&inputHashlist, "I", "", "Verify files against a checksum file")
-	flag.StringVar(&inputHashlist, "input-hashlist", "", "Alias for -I")
+	flag.StringVar(&outputHashlist, "output-hashlist", "", "Create a checksum file")
+	flag.StringVar(&outputHashlist, "O", "", "Alias for -output-hashlist")
+	flag.StringVar(&inputHashlist, "input-hashlist", "", "Verify files against a checksum file")
+	flag.StringVar(&inputHashlist, "I", "", "Alias for -input-hashlist")
+
+	flag.IntVar(&threads, "threads", 1, "Number of threads to use (default 1, set to 0 to use all threads)")
+	flag.IntVar(&threads, "T", 1, "Alias for -threads")
 
 	flag.Parse()
+
+	numCPU := runtime.NumCPU()
+	if threads == 0 {
+		threads = numCPU
+	} else if threads > numCPU {
+		fmt.Fprintf(os.Stderr, "Error: requested %d threads, but only %d cores are available\n", threads, numCPU)
+		os.Exit(1)
+	}
 
 	if benchmark {
 		if len(flag.Args()) > 0 {
@@ -185,7 +200,7 @@ func benchAll() {
 		benchSeed,
 	)
 
-	fmt.Printf("Benchmarking all algorithms (%d bytes, %d iterations):\n", dataSize, iterations)
+	fmt.Printf("Benchmarking all algorithms (%d bytes, %d iterations, %d threads):\n", dataSize, iterations, threads)
 	fmt.Println("======================================================")
 
 	keys := make([]string, 0, len(supportedAlgos))
@@ -196,35 +211,55 @@ func benchAll() {
 
 	for _, name := range keys {
 		factory := supportedAlgos[name]
-		h := factory()
-
+		
+		var wg sync.WaitGroup
 		var sum []byte
-
 		start := time.Now()
-		for i := 0; i < iterations; i++ {
-			h.Reset()
-			h.Write(data)
-			sum = h.Sum(nil)
+
+		for t := 0; t < threads; t++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				h := factory()
+				for i := 0; i < iterations; i++ {
+					h.Reset()
+					h.Write(data)
+					localSum := h.Sum(nil)
+					if sum == nil {
+						sum = localSum
+					}
+				}
+			}()
 		}
+		wg.Wait()
 
-		total := time.Since(start)
-		avg := total / iterations
+		totalDuration := time.Since(start)
+		
+		totalIters := iterations * threads
+		avgPerIter := totalDuration / time.Duration(totalIters)
+		
+		seconds := totalDuration.Seconds()
+		totalMB := float64(dataSize*totalIters) / (1024 * 1024)
+		mbPerSecTotal := totalMB / seconds
+		mbPerSecThread := (float64(dataSize*iterations) / (1024 * 1024)) / (totalDuration.Seconds())
 
-		seconds := avg.Seconds()
-		mbPerSec := (float64(dataSize) / (1024 * 1024)) / seconds
-
-		var speedStr string
-		if mbPerSec >= 1024 {
-			speedStr = fmt.Sprintf("%.2f GB/s", mbPerSec/1024)
-		} else {
-			speedStr = fmt.Sprintf("%.2f MB/s", mbPerSec)
+		formatSpeed := func(mbs float64) string {
+			if mbs >= 1024 {
+				return fmt.Sprintf("%.2f GB/s", mbs/1024)
+			}
+			return fmt.Sprintf("%.2f MB/s", mbs)
 		}
 
 		fmt.Printf(
-			"%-15s avg/iter = %-11v (%-11s), result hash = %x\n",
+			"%s\n"+
+			"╟─ avg/iter = %v\n"+
+			"╟─ throughput = %s\n"+
+			"╟─ throughput/thread = %s\n"+
+			"╙─ result hash = %x\n\n",
 			name,
-			avg,
-			speedStr,
+			avgPerIter,
+			formatSpeed(mbPerSecTotal),
+			formatSpeed(mbPerSecThread),
 			sum,
 		)
 	}
@@ -249,30 +284,49 @@ func hashFile(filePath string) error {
 }
 
 func hashDirectory(dirPath string) error {
-	return filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+	type task struct {
+		path string
+	}
+	
+	tasks := make(chan task)
+	var wg sync.WaitGroup
+
+	for w := 0; w < threads; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				file, err := os.Open(t.path)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", t.path, err)
+					continue
+				}
+				
+				hasher := selectedHash()
+				if _, err := io.Copy(hasher, file); err != nil {
+					fmt.Fprintf(os.Stderr, "Error hashing %s: %v\n", t.path, err)
+					file.Close()
+					continue
+				}
+				file.Close()
+				fmt.Printf("%s %s: %x\n", t.path, selectedAlgoName, hasher.Sum(nil))
+			}
+		}()
+	}
+
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
-		if info.IsDir() || !info.Mode().IsRegular() {
-			return nil
+		if !info.IsDir() && info.Mode().IsRegular() {
+			tasks <- task{path: path}
 		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", path, err)
-			return nil
-		}
-		defer file.Close()
-
-		hasher := selectedHash()
-		if _, err := io.Copy(hasher, file); err != nil {
-			return fmt.Errorf("failed to hash file %s: %w", path, err)
-		}
-
-		fmt.Printf("%s %s: %x\n", path, selectedAlgoName, hasher.Sum(nil))
 		return nil
 	})
+
+	close(tasks)
+	wg.Wait()
+	return err
 }
 
 func writeHashlist(inputPath string, outputPath string) error {
@@ -283,6 +337,87 @@ func writeHashlist(inputPath string, outputPath string) error {
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		return fmt.Errorf("input is a special file, only regular files and directories are supported for hashlists")
 	}
+
+	type hashResult struct {
+		line    string
+		relPath string
+	}
+
+	tasks := make(chan string)
+	results := make(chan hashResult)
+	var wg sync.WaitGroup
+
+	for w := 0; w < threads; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range tasks {
+				f, err := os.Open(path)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", path, err)
+					continue
+				}
+
+				h := selectedHash()
+				if _, err := io.Copy(h, f); err != nil {
+					fmt.Fprintf(os.Stderr, "Error hashing %s: %v\n", path, err)
+					f.Close()
+					continue
+				}
+				f.Close()
+
+				hashSum := h.Sum(nil)
+				relPath, err := filepath.Rel(inputPath, path)
+				if err != nil || relPath == "." {
+					relPath = filepath.Base(path)
+				}
+				relPath = filepath.ToSlash(relPath)
+
+				fmt.Printf("%s %s: %x\n", relPath, selectedAlgoName, hashSum)
+
+				results <- hashResult{
+					line:    fmt.Sprintf("%x:%s\n", hashSum, relPath),
+					relPath: relPath,
+				}
+			}
+		}()
+	}
+
+	var finalEntries []hashResult
+	collectorDone := make(chan struct{})
+	go func() {
+		for r := range results {
+			finalEntries = append(finalEntries, r)
+		}
+		close(collectorDone)
+	}()
+
+	if info.IsDir() {
+		err = filepath.Walk(inputPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && info.Mode().IsRegular() {
+				tasks <- path
+			}
+			return nil
+		})
+	} else {
+		tasks <- inputPath
+	}
+
+	close(tasks)
+	wg.Wait()
+	close(results)
+	<-collectorDone
+
+	if err != nil {
+		return err
+	}
+
+	sort.Slice(finalEntries, func(i, j int) bool {
+		return finalEntries[i].relPath < finalEntries[j].relPath
+	})
 
 	outFile, err := os.Create(outputPath)
 	if err != nil {
@@ -295,60 +430,14 @@ func writeHashlist(inputPath string, outputPath string) error {
 		return err
 	}
 
-	totalCount := 0
-	processFile := func(path string) error {
-		f, err := os.Open(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", path, err)
-			return nil
-		}
-		defer f.Close()
-
-		h := selectedHash()
-		if _, err := io.Copy(h, f); err != nil {
+	for _, entry := range finalEntries {
+		if _, err := outFile.WriteString(entry.line); err != nil {
 			return err
 		}
-
-		hashSum := h.Sum(nil)
-		
-		relPath, err := filepath.Rel(inputPath, path)
-		if err != nil {
-			return err
-		}
-		if relPath == "." {
-			relPath = filepath.Base(path)
-		}
-		
-		relPath = filepath.ToSlash(relPath)
-
-		fmt.Printf("%s %s: %x\n", relPath, selectedAlgoName, hashSum)
-
-		line := fmt.Sprintf("%x:%s\n", hashSum, relPath)
-		_, err = outFile.WriteString(line)
-		if err == nil {
-			totalCount++
-		}
-		return err
 	}
 
-	if info.IsDir() {
-		err = filepath.Walk(inputPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && info.Mode().IsRegular() {
-				return processFile(path)
-			}
-			return nil
-		})
-	} else {
-		err = processFile(inputPath)
-	}
-
-	if err == nil {
-		fmt.Printf("\nTotal: %d\n", totalCount)
-	}
-	return err
+	fmt.Printf("\nTotal: %d\n", len(finalEntries))
+	return nil
 }
 
 func verifyHashlist(listPath string, targetDir string) error {
@@ -357,8 +446,6 @@ func verifyHashlist(listPath string, targetDir string) error {
 		return err
 	}
 	defer file.Close()
-
-	var total, passed, failed, missing, errored int
 
 	scanner := bufio.NewScanner(file)
 	if !scanner.Scan() {
@@ -393,64 +480,107 @@ func verifyHashlist(listPath string, targetDir string) error {
 		baseDir = filepath.Dir(listPath)
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		idx := strings.Index(line, ":")
-		if idx == -1 {
-			continue
-		}
-		total++
-		expectedHex := line[:idx]
-		relPath := filepath.FromSlash(line[idx+1:])
-		fullPath := filepath.Join(baseDir, relPath)
+	type result struct {
+		relPath string
+		status  string // "PASS", "FAIL", "MISSING", "ERROR"
+		err     string
+	}
 
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				fmt.Printf("%s: %sMISSING%s\n", relPath, colorYellow, colorReset)
+	type lineTask struct {
+		expectedHex string
+		relPath     string
+	}
+
+	tasks := make(chan lineTask)
+	results := make(chan result)
+	var wg sync.WaitGroup
+
+	for w := 0; w < threads; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				fullPath := filepath.Join(baseDir, t.relPath)
+				info, err := os.Stat(fullPath)
+				if err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						results <- result{relPath: t.relPath, status: "MISSING"}
+					} else {
+						results <- result{relPath: t.relPath, status: "ERROR"}
+					}
+					continue
+				}
+
+				if info.IsDir() {
+					results <- result{relPath: t.relPath, status: "ERROR", err: "(is a directory)"}
+					continue
+				}
+
+				f, err := os.Open(fullPath)
+				if err != nil {
+					results <- result{relPath: t.relPath, status: "ERROR"}
+					continue
+				}
+
+				h := factory()
+				_, copyErr := io.Copy(h, f)
+				f.Close()
+
+				if copyErr != nil {
+					results <- result{relPath: t.relPath, status: "ERROR"}
+					continue
+				}
+
+				actualHex := hex.EncodeToString(h.Sum(nil))
+				if actualHex == t.expectedHex {
+					results <- result{relPath: t.relPath, status: "PASS"}
+				} else {
+					results <- result{relPath: t.relPath, status: "FAIL"}
+				}
+			}
+		}()
+	}
+
+	var total, passed, failed, missing, errored int
+	
+	go func() {
+		for r := range results {
+			total++
+			switch r.status {
+			case "PASS":
+				fmt.Printf("%s: %sPASS%s\n", r.relPath, colorGreen, colorReset)
+				passed++
+			case "FAIL":
+				fmt.Printf("%s: %sFAIL%s\n", r.relPath, colorRed, colorReset)
+				failed++
+			case "MISSING":
+				fmt.Printf("%s: %sMISSING%s\n", r.relPath, colorYellow, colorReset)
 				missing++
-			} else {
-				fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
+			case "ERROR":
+				suffix := ""
+				if r.err != "" {
+					suffix = " " + r.err
+				}
+				fmt.Printf("%s: %sERROR%s%s\n", r.relPath, colorDarkRed, colorReset, suffix)
 				errored++
 			}
-			continue
 		}
+	}()
 
-		if info.IsDir() {
-			fmt.Printf("%s: %sERROR (is a directory)%s\n", relPath, colorDarkRed, colorReset)
-			errored++
-			continue
-		}
-
-		f, err := os.Open(fullPath)
-		if err != nil {
-			fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
-			errored++
-			continue
-		}
-
-		h := factory()
-		_, copyErr := io.Copy(h, f)
-		f.Close()
-
-		if copyErr != nil {
-			fmt.Printf("%s: %sERROR%s\n", relPath, colorDarkRed, colorReset)
-			errored++
-			continue
-		}
-
-		actualHex := hex.EncodeToString(h.Sum(nil))
-		if actualHex == expectedHex {
-			fmt.Printf("%s: %sPASS%s\n", relPath, colorGreen, colorReset)
-			passed++
-		} else {
-			fmt.Printf("%s: %sFAIL%s\n", relPath, colorRed, colorReset)
-			failed++
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" { continue }
+		idx := strings.Index(line, ":")
+		if idx == -1 { continue }
+		tasks <- lineTask{
+			expectedHex: line[:idx],
+			relPath:     filepath.FromSlash(line[idx+1:]),
 		}
 	}
+
+	close(tasks)
+	wg.Wait()
+	close(results)
 
 	fmt.Printf("\nTotal: %d. Passed: %d. Failed: %d. Missing: %d. Error: %d.\n",
 		total, passed, failed, missing, errored)
