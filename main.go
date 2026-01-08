@@ -39,7 +39,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-const lzHashVersion = "v1.5"
+const lzHashVersion = "v1.5.1"
 
 const defaultAlgo = "sha256" // should do as default
 
