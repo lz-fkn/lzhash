@@ -470,6 +470,8 @@ func verifyHashlist(listPath string, targetDir string) error {
 		return errors.New("no algorithm specified in hashlist header")
 	}
 
+	fmt.Printf("Used algo: %s\n", algo)
+
 	factory, ok := supportedAlgos[strings.ToLower(algo)]
 	if !ok {
 		return fmt.Errorf("unsupported hash algorithm in hashlist: %s", algo)
@@ -543,6 +545,8 @@ func verifyHashlist(listPath string, targetDir string) error {
 
 	var total, passed, failed, missing, errored int
 	
+	collectorDone := make(chan struct{})
+
 	go func() {
 		for r := range results {
 			total++
@@ -565,6 +569,7 @@ func verifyHashlist(listPath string, targetDir string) error {
 				errored++
 			}
 		}
+		close(collectorDone)
 	}()
 
 	for scanner.Scan() {
@@ -581,6 +586,8 @@ func verifyHashlist(listPath string, targetDir string) error {
 	close(tasks)
 	wg.Wait()
 	close(results)
+
+	<-collectorDone
 
 	fmt.Printf("\nTotal: %d. Passed: %d. Failed: %d. Missing: %d. Error: %d.\n",
 		total, passed, failed, missing, errored)
