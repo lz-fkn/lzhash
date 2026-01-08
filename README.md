@@ -31,7 +31,7 @@ go version
 ```
 then simply run:
 ```
-go install github.com/lz-fkn/lzhash@master
+go install github.com/lz-fkn/lzhash@latest
 ```
 it should be available in your system after that, if not then check if GOPATH is in your PATH.
 
@@ -46,5 +46,6 @@ set GOOS and GOARCH if needed. `-ldflags="-s -w"` can be omitted, but i prefer t
 
 ---
 lz-fkn, 2026. see LICENSE for license or something
+
 
 
