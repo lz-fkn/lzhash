@@ -19,17 +19,20 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-	"runtime"
-    "sync"
 
 	"github.com/c0mm4nd/go-ripemd"
 	"github.com/cespare/xxhash/v2"
 	"github.com/cxmcc/tiger"
+	"github.com/deatil/go-hash/haval"
 	"github.com/gnabgib/gnablib-go/checksum/fletcher"
+	"github.com/htruong/go-md2"
 	"github.com/jzelinskie/whirlpool"
+	"github.com/pkositsyn/streebog-hash"
 	"github.com/spaolacci/murmur3"
 	"github.com/tjfoc/gmsm/sm3"
 	"github.com/zeebo/blake3"
@@ -39,7 +42,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-const lzHashVersion = "v1.5.1"
+const lzHashVersion = "v1.6.0"
 
 const defaultAlgo = "sha256" // should do as default
 
@@ -67,45 +70,55 @@ func MustNewHash(h hash.Hash, err error) hash.Hash {
 	return h
 }
 
-// not sure if it truly needs to be separated, or it can be moved to crc64.New(...), but whatever 
+// not sure if it truly needs to be separated, or it can be moved to crc64.New(...), but whatever
 var ecmaTable = crc64.MakeTable(crc64.ECMA)
 
 var supportedAlgos = map[string]func() hash.Hash{
-	"adler32":     func() hash.Hash { return adler32.New() },
-	"blake2b-256": func() hash.Hash { return MustNewHash(blake2b.New256(nil)) },
-	"blake2b-384": func() hash.Hash { return MustNewHash(blake2b.New384(nil)) },
-	"blake2b-512": func() hash.Hash { return MustNewHash(blake2b.New512(nil)) },
-	"blake2s-256": func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
-	"blake3":      func() hash.Hash { return blake3.New() },
-	"crc32":       func() hash.Hash { return crc32.NewIEEE() },
-	"crc64":       func() hash.Hash { return crc64.New(ecmaTable) },
-	"fletcher32":  func() hash.Hash { return fletcher.New32() },
-	"fnv-32":      func() hash.Hash { return fnv.New32() },
-	"fnv-64a":     func() hash.Hash { return fnv.New64a() },
-	"md4":         func() hash.Hash { return md4.New() },
-	"md5":         func() hash.Hash { return md5.New() },
-	"murmur3-32":  func() hash.Hash { return murmur3.New32() },
-	"ripemd128":   func() hash.Hash { return ripemd.New128() },
-	"ripemd160":   func() hash.Hash { return ripemd.New160() },
-	"ripemd256":   func() hash.Hash { return ripemd.New256() },
-	"ripemd320":   func() hash.Hash { return ripemd.New320() },
-	"sha1":        func() hash.Hash { return sha1.New() },
-	"sha224":      func() hash.Hash { return sha256.New224() },
-	"sha256":      func() hash.Hash { return sha256.New() },
-	"sha384":      func() hash.Hash { return sha512.New384() },
-	"sha512":      func() hash.Hash { return sha512.New() },
-	"sha512-256":  func() hash.Hash { return sha512.New512_256() },
-	"sha3-224":    func() hash.Hash { return sha3.New224() },
-	"sha3-256":    func() hash.Hash { return sha3.New256() },
-	"sha3-384":    func() hash.Hash { return sha3.New384() },
-	"sha3-512":    func() hash.Hash { return sha3.New512() },
-	"shake128":    func() hash.Hash { return sha3.NewShake128() },
-	"shake256":    func() hash.Hash { return sha3.NewShake256() },
-	"sm3":         func() hash.Hash { return sm3.New() },
-	"tiger":       func() hash.Hash { return tiger.New() },
-	"tiger2":      func() hash.Hash { return tiger.New2() },
-	"whirlpool":   func() hash.Hash { return whirlpool.New() },
-	"xxh64":       func() hash.Hash { return xxhash.New() },
+	"adler32":      func() hash.Hash { return adler32.New() },
+	"blake2b-256":  func() hash.Hash { return MustNewHash(blake2b.New256(nil)) },
+	"blake2b-384":  func() hash.Hash { return MustNewHash(blake2b.New384(nil)) },
+	"blake2b-512":  func() hash.Hash { return MustNewHash(blake2b.New512(nil)) },
+	"blake2s-256":  func() hash.Hash { return MustNewHash(blake2s.New256(nil)) }, // renamed from "blake2s" so it's easier to understand what this is
+	"blake3":       func() hash.Hash { return blake3.New() },
+	"crc32":        func() hash.Hash { return crc32.NewIEEE() },
+	"crc64":        func() hash.Hash { return crc64.New(ecmaTable) },
+	"fletcher32":   func() hash.Hash { return fletcher.New32() },
+	"fnv-32":       func() hash.Hash { return fnv.New32() },
+	"fnv-64a":      func() hash.Hash { return fnv.New64a() },
+	"md2":          func() hash.Hash { return md2.New() },
+	"md4":          func() hash.Hash { return md4.New() },
+	"md5":          func() hash.Hash { return md5.New() },
+	"haval-128":    func() hash.Hash { return haval.New128_5() },
+	"haval-160":    func() hash.Hash { return haval.New160_5() },
+	"haval-192":    func() hash.Hash { return haval.New192_5() },
+	"haval-224":    func() hash.Hash { return haval.New224_5() },
+	"haval-256":    func() hash.Hash { return haval.New256_5() },
+	"keccak-256":   func() hash.Hash { return sha3.NewLegacyKeccak256() },
+	"keccak-512":   func() hash.Hash { return sha3.NewLegacyKeccak512() },
+	"murmur3-32":   func() hash.Hash { return murmur3.New32() },
+	"ripemd128":    func() hash.Hash { return ripemd.New128() },
+	"ripemd160":    func() hash.Hash { return ripemd.New160() },
+	"ripemd256":    func() hash.Hash { return ripemd.New256() },
+	"ripemd320":    func() hash.Hash { return ripemd.New320() },
+	"sha1":         func() hash.Hash { return sha1.New() },
+	"sha224":       func() hash.Hash { return sha256.New224() },
+	"sha256":       func() hash.Hash { return sha256.New() },
+	"sha384":       func() hash.Hash { return sha512.New384() },
+	"sha512":       func() hash.Hash { return sha512.New() },
+	"sha512-256":   func() hash.Hash { return sha512.New512_256() },
+	"sha3-224":     func() hash.Hash { return sha3.New224() },
+	"sha3-256":     func() hash.Hash { return sha3.New256() },
+	"sha3-384":     func() hash.Hash { return sha3.New384() },
+	"sha3-512":     func() hash.Hash { return sha3.New512() },
+	"shake128":     func() hash.Hash { return sha3.NewShake128() },
+	"shake256":     func() hash.Hash { return sha3.NewShake256() },
+	"sm3":          func() hash.Hash { return sm3.New() },
+	"streebog-256": func() hash.Hash { return streebog.New256() },
+	"streebog-512": func() hash.Hash { return streebog.New512() },
+	"tiger":        func() hash.Hash { return tiger.New() },
+	"tiger2":       func() hash.Hash { return tiger.New2() },
+	"whirlpool":    func() hash.Hash { return whirlpool.New() },
+	"xxh64":        func() hash.Hash { return xxhash.New() },
 	// you can add more algos if you want, as long as they use simple hash.Hash
 }
 
@@ -211,7 +224,7 @@ func benchAll() {
 
 	for _, name := range keys {
 		factory := supportedAlgos[name]
-		
+
 		var wg sync.WaitGroup
 		var sum []byte
 		start := time.Now()
@@ -234,10 +247,10 @@ func benchAll() {
 		wg.Wait()
 
 		totalDuration := time.Since(start)
-		
+
 		totalIters := iterations * threads
 		avgPerIter := totalDuration / time.Duration(totalIters)
-		
+
 		seconds := totalDuration.Seconds()
 		totalMB := float64(dataSize*totalIters) / (1024 * 1024)
 		mbPerSecTotal := totalMB / seconds
@@ -252,10 +265,10 @@ func benchAll() {
 
 		fmt.Printf(
 			"%s\n"+
-			"╟─ avg/iter = %v\n"+
-			"╟─ throughput = %s\n"+
-			"╟─ throughput/thread = %s\n"+
-			"╙─ result hash = %x\n\n",
+				"╟─ avg/iter = %v\n"+
+				"╟─ throughput = %s\n"+
+				"╟─ throughput/thread = %s\n"+
+				"╙─ result hash = %x\n\n",
 			name,
 			avgPerIter,
 			formatSpeed(mbPerSecTotal),
@@ -287,7 +300,7 @@ func hashDirectory(dirPath string) error {
 	type task struct {
 		path string
 	}
-	
+
 	tasks := make(chan task)
 	var wg sync.WaitGroup
 
@@ -298,18 +311,18 @@ func hashDirectory(dirPath string) error {
 			for t := range tasks {
 				file, err := os.Open(t.path)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", t.path, err)
+					fmt.Fprintf(os.Stderr, "[%d] Warning: Skipping file %s (error opening: %v)\n", w, t.path, err)
 					continue
 				}
-				
+
 				hasher := selectedHash()
 				if _, err := io.Copy(hasher, file); err != nil {
-					fmt.Fprintf(os.Stderr, "Error hashing %s: %v\n", t.path, err)
+					fmt.Fprintf(os.Stderr, "[%d] Error hashing %s: %v\n", w, t.path, err)
 					file.Close()
 					continue
 				}
 				file.Close()
-				fmt.Printf("%s %s: %x\n", t.path, selectedAlgoName, hasher.Sum(nil))
+				fmt.Printf("[%d] %s %s: %x\n", w, t.path, selectedAlgoName, hasher.Sum(nil))
 			}
 		}()
 	}
@@ -354,13 +367,13 @@ func writeHashlist(inputPath string, outputPath string) error {
 			for path := range tasks {
 				f, err := os.Open(path)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: Skipping file %s (error opening: %v)\n", path, err)
+					fmt.Fprintf(os.Stderr, "[%d] Warning: Skipping file %s (error opening: %v)\n", w, path, err)
 					continue
 				}
 
 				h := selectedHash()
 				if _, err := io.Copy(h, f); err != nil {
-					fmt.Fprintf(os.Stderr, "Error hashing %s: %v\n", path, err)
+					fmt.Fprintf(os.Stderr, "[%d] Error hashing %s: %v\n", w, path, err)
 					f.Close()
 					continue
 				}
@@ -373,7 +386,7 @@ func writeHashlist(inputPath string, outputPath string) error {
 				}
 				relPath = filepath.ToSlash(relPath)
 
-				fmt.Printf("%s %s: %x\n", relPath, selectedAlgoName, hashSum)
+				fmt.Printf("[%d] %s %s: %x\n", w, relPath, selectedAlgoName, hashSum)
 
 				results <- hashResult{
 					line:    fmt.Sprintf("%x:%s\n", hashSum, relPath),
@@ -483,6 +496,7 @@ func verifyHashlist(listPath string, targetDir string) error {
 	}
 
 	type result struct {
+		thread  int
 		relPath string
 		status  string // "PASS", "FAIL", "MISSING", "ERROR"
 		err     string
@@ -506,21 +520,21 @@ func verifyHashlist(listPath string, targetDir string) error {
 				info, err := os.Stat(fullPath)
 				if err != nil {
 					if errors.Is(err, os.ErrNotExist) {
-						results <- result{relPath: t.relPath, status: "MISSING"}
+						results <- result{thread: w, relPath: t.relPath, status: "MISSING"}
 					} else {
-						results <- result{relPath: t.relPath, status: "ERROR"}
+						results <- result{thread: w, relPath: t.relPath, status: "ERROR"}
 					}
 					continue
 				}
 
 				if info.IsDir() {
-					results <- result{relPath: t.relPath, status: "ERROR", err: "(is a directory)"}
+					results <- result{thread: w, relPath: t.relPath, status: "ERROR", err: "(is a directory)"}
 					continue
 				}
 
 				f, err := os.Open(fullPath)
 				if err != nil {
-					results <- result{relPath: t.relPath, status: "ERROR"}
+					results <- result{thread: w, relPath: t.relPath, status: "ERROR"}
 					continue
 				}
 
@@ -529,22 +543,22 @@ func verifyHashlist(listPath string, targetDir string) error {
 				f.Close()
 
 				if copyErr != nil {
-					results <- result{relPath: t.relPath, status: "ERROR"}
+					results <- result{thread: w, relPath: t.relPath, status: "ERROR"}
 					continue
 				}
 
 				actualHex := hex.EncodeToString(h.Sum(nil))
 				if actualHex == t.expectedHex {
-					results <- result{relPath: t.relPath, status: "PASS"}
+					results <- result{thread: w, relPath: t.relPath, status: "PASS"}
 				} else {
-					results <- result{relPath: t.relPath, status: "FAIL"}
+					results <- result{thread: w, relPath: t.relPath, status: "FAIL"}
 				}
 			}
 		}()
 	}
 
 	var total, passed, failed, missing, errored int
-	
+
 	collectorDone := make(chan struct{})
 
 	go func() {
@@ -552,20 +566,20 @@ func verifyHashlist(listPath string, targetDir string) error {
 			total++
 			switch r.status {
 			case "PASS":
-				fmt.Printf("%s: %sPASS%s\n", r.relPath, colorGreen, colorReset)
+				fmt.Printf("[%d] %s: %sPASS%s\n", r.thread, r.relPath, colorGreen, colorReset)
 				passed++
 			case "FAIL":
-				fmt.Printf("%s: %sFAIL%s\n", r.relPath, colorRed, colorReset)
+				fmt.Printf("[%d] %s: %sFAIL%s\n", r.thread, r.relPath, colorRed, colorReset)
 				failed++
 			case "MISSING":
-				fmt.Printf("%s: %sMISSING%s\n", r.relPath, colorYellow, colorReset)
+				fmt.Printf("[%d] %s: %sMISSING%s\n", r.thread, r.relPath, colorYellow, colorReset)
 				missing++
 			case "ERROR":
 				suffix := ""
 				if r.err != "" {
 					suffix = " " + r.err
 				}
-				fmt.Printf("%s: %sERROR%s%s\n", r.relPath, colorDarkRed, colorReset, suffix)
+				fmt.Printf("[%d] %s: %sERROR%s%s\n", r.thread, r.relPath, colorDarkRed, colorReset, suffix)
 				errored++
 			}
 		}
@@ -574,9 +588,13 @@ func verifyHashlist(listPath string, targetDir string) error {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" { continue }
+		if line == "" {
+			continue
+		}
 		idx := strings.Index(line, ":")
-		if idx == -1 { continue }
+		if idx == -1 {
+			continue
+		}
 		tasks <- lineTask{
 			expectedHex: line[:idx],
 			relPath:     filepath.FromSlash(line[idx+1:]),
@@ -596,7 +614,7 @@ func verifyHashlist(listPath string, targetDir string) error {
 }
 
 func main() {
-	fmt.Printf("lzHash %s, by Elzzie. BSD 2-Clause License\n\n", lzHashVersion)
+	fmt.Printf("lzHash %s, by Elzzie. MIT License\n\n", lzHashVersion)
 	if benchmark {
 		benchAll()
 		return
@@ -607,7 +625,7 @@ func main() {
 		if len(flag.Args()) > 0 {
 			targetDir = flag.Args()[0]
 		}
-		
+
 		err := verifyHashlist(inputHashlist, targetDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
